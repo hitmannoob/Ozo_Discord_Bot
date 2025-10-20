@@ -3,8 +3,6 @@ from discord import app_commands
 from discord.ext import commands
 import asyncio
 import aiohttp
-import mysql.connector
-from mysql.connector import pooling
 import openai
 import PyPDF2
 import docx
@@ -18,6 +16,8 @@ from datetime import datetime
 import logging
 from pydantic import BaseModel
 from typing import List
+import sqlite3
+from contextlib import contextmanager
 
 import requests
 from bs4 import BeautifulSoup
@@ -30,19 +30,13 @@ from bs4 import BeautifulSoup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('discord_bot')
 
-# Configuration
 class Config:
     """config class to store all config"""
     DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-    DB_CONFIG = {
-        'host': os.getenv('DB_HOST', 'localhost'),
-        'user': os.getenv('DB_USER', 'root'),
-        'password': os.getenv('DB_PASSWORD', ''),
-        'database': os.getenv('DB_NAME', 'discord_resource_bot')
-    }
-    GROUP_THEME = os.getenv('GROUP_THEME', 'Technology and Programming')  # Configure per server
-    MAX_DOCUMENT_TOKENS = 1000  # Initial tokens for document relevance check
+    DATABASE_PATH = os.getenv('DATABASE_PATH', 'discord_bot.db')  # Add this
+    GROUP_THEME = os.getenv('GROUP_THEME', 'Technology and Programming')
+    MAX_DOCUMENT_TOKENS = 1000
 
 # Initialize OpenAI
 api_key = Config.OPENAI_API_KEY
@@ -53,158 +47,175 @@ class Keyword(BaseModel):
     
 
 class DatabaseManager:
-    """Database class for all the sql files"""
+    """Database class for all the sql files - SQLite version"""
     def __init__(self):
-        self.pool = mysql.connector.pooling.MySQLConnectionPool(
-            pool_name="discord_bot_pool",
-            pool_size=5,
-            pool_reset_session=True,
-            **Config.DB_CONFIG
-        )
+        self.db_path = 'discord_bot.db'  # Creates file in same directory
         self.init_database()
+    
+    @contextmanager
+    def get_connection(self):
+        """Context manager for database connections"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row  # Enable column access by name
+        try:
+            yield conn
+        finally:
+            conn.close()
     
     def init_database(self):
         """Initialize database tables"""
-        conn = self.pool.get_connection()
-        cursor = conn.cursor()
-        
-        # Users table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                discord_id BIGINT PRIMARY KEY,
-                discord_username VARCHAR(255),
-                server_id BIGINT,
-                job_title VARCHAR(255),
-                skills TEXT,
-                interests TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                INDEX idx_server (server_id)
-            )
-        ''')
-        
-        # Server configurations table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS server_configs (
-                server_id BIGINT PRIMARY KEY,
-                theme VARCHAR(500),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Resources tracking table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS resources (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                server_id BIGINT,
-                message_id BIGINT,
-                resource_type VARCHAR(50),
-                resource_url TEXT,
-                resource_summary TEXT,
-                tagged_users TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                INDEX idx_server_resource (server_id)
-            )
-        ''')
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Users table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    discord_id INTEGER PRIMARY KEY,
+                    discord_username TEXT,
+                    server_id INTEGER,
+                    job_title TEXT,
+                    skills TEXT,
+                    interests TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create index for server_id
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_server ON users(server_id)
+            ''')
+            
+            # Server configurations table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS server_configs (
+                    server_id INTEGER PRIMARY KEY,
+                    theme TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Resources tracking table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS resources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_id INTEGER,
+                    message_id INTEGER,
+                    resource_type TEXT,
+                    resource_url TEXT,
+                    resource_summary TEXT,
+                    tagged_users TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create index for server_id in resources
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_server_resource ON resources(server_id)
+            ''')
+            
+            conn.commit()
     
     def save_user(self, discord_id, discord_username, server_id, job_title, skills, interests):
         """Save or update user profile"""
-        conn = self.pool.get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO users (discord_id, discord_username, server_id, job_title, skills, interests)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-            discord_username = VALUES(discord_username),
-            job_title = VALUES(job_title),
-            skills = VALUES(skills),
-            interests = VALUES(interests),
-            updated_at = CURRENT_TIMESTAMP
-        ''', (discord_id, discord_username, server_id, job_title, skills, interests))
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if user exists
+            cursor.execute('''
+                SELECT discord_id FROM users WHERE discord_id = ? AND server_id = ?
+            ''', (discord_id, server_id))
+            
+            if cursor.fetchone():
+                # Update existing user
+                cursor.execute('''
+                    UPDATE users 
+                    SET discord_username = ?, job_title = ?, skills = ?, 
+                        interests = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND server_id = ?
+                ''', (discord_username, job_title, skills, interests, discord_id, server_id))
+            else:
+                # Insert new user
+                cursor.execute('''
+                    INSERT INTO users (discord_id, discord_username, server_id, 
+                                     job_title, skills, interests)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (discord_id, discord_username, server_id, job_title, skills, interests))
+            
+            conn.commit()
     
     def get_user(self, discord_id, server_id):
         """Get user profile"""
-        conn = self.pool.get_connection()
-        cursor = conn.cursor(dictionary=True)
-        
-        cursor.execute('''
-            SELECT * FROM users WHERE discord_id = %s AND server_id = %s
-        ''', (discord_id, server_id))
-        
-        user = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        return user
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT * FROM users WHERE discord_id = ? AND server_id = ?
+            ''', (discord_id, server_id))
+            
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
     
     def get_all_users(self, server_id):
         """Get all users in a server"""
-        conn = self.pool.get_connection()
-        cursor = conn.cursor(dictionary=True)
-        
-        cursor.execute('''
-            SELECT * FROM users WHERE server_id = %s
-        ''', (server_id,))
-        
-        users = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return users
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT * FROM users WHERE server_id = ?
+            ''', (server_id,))
+            
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
     
     def get_skills(self, server_id):
         """get skills of all users in a server"""
-        conn = self.pool.get_connection()
-        cursor = conn.cursor(dictionary = True)
-        cursor.execute(
-            '''
-SELECT skills FROM users WHERE server_id = %s
-
-''', (server_id,)
-        )
-        skills = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return skills
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT skills FROM users WHERE server_id = ?
+            ''', (server_id,))
+            
+            rows = cursor.fetchall()
+            return [{'skills': row['skills']} for row in rows]
     
     def save_server_theme(self, server_id, theme):
         """Save server theme configuration"""
-        conn = self.pool.get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO server_configs (server_id, theme)
-            VALUES (%s, %s)
-            ON DUPLICATE KEY UPDATE theme = VALUES(theme)
-        ''', (server_id, theme))
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if config exists
+            cursor.execute('''
+                SELECT server_id FROM server_configs WHERE server_id = ?
+            ''', (server_id,))
+            
+            if cursor.fetchone():
+                # Update existing config
+                cursor.execute('''
+                    UPDATE server_configs SET theme = ? WHERE server_id = ?
+                ''', (theme, server_id))
+            else:
+                # Insert new config
+                cursor.execute('''
+                    INSERT INTO server_configs (server_id, theme) VALUES (?, ?)
+                ''', (server_id, theme))
+            
+            conn.commit()
     
     def get_server_theme(self, server_id):
         """Get server theme"""
-        conn = self.pool.get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT theme FROM server_configs WHERE server_id = %s
-        ''', (server_id,))
-        
-        result = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        return result[0] if result else Config.GROUP_THEME
-    
-
-
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT theme FROM server_configs WHERE server_id = ?
+            ''', (server_id,))
+            
+            result = cursor.fetchone()
+            return result['theme'] if result else Config.GROUP_THEME
 
 
 # Resource Analyzer
@@ -245,7 +256,7 @@ class ResourceAnalyzer:
         try:
             response = await ResourceAnalyzer.client.responses.parse(
                     model="gpt-5-mini",
-                    messages=[
+                    input=[
                         {
                             "role": "system",
                             "content": (
@@ -264,11 +275,12 @@ class ResourceAnalyzer:
                             )
                         }
                     ],
-                    text_format=Keyword
+                    response_format=Keyword
             )
             
             result = response.output_parsed()
-            return result.keyword_list
+            result = list(result.keyword_list)
+            return result
         except Exception as e:
             logger.error(f"Error checking relevance: {e}")
             return ""
@@ -284,7 +296,7 @@ class ResourceAnalyzer:
         soup = BeautifulSoup(content , "html.parser")
         response = await ResourceAnalyzer.client.responses.parse(
             model="gpt-5-mini",
-            messages=[
+            input=[
                 {
                     "role": "system",
                     "content": (
@@ -303,10 +315,11 @@ class ResourceAnalyzer:
                     )
                 }
             ],
-            text_format=Keyword
-        )
+            response_format=Keyword # type: ignore
+        ) # type: ignore
         output_keyword = response.output_parsed
-        return output_keyword.keyword_list
+        output = list(output_keyword.keyword_list)
+        return output
 
 
     
