@@ -7,7 +7,7 @@ import openai
 import PyPDF2
 import docx
 import io
-from openai import OpenAI
+from openai import AsyncOpenAI
 import os
 import json
 import re
@@ -221,7 +221,7 @@ class DatabaseManager:
 # Resource Analyzer
 class ResourceAnalyzer:
     """core discord logic"""
-    client = OpenAI(
+    client = AsyncOpenAI(
                 api_key = api_key
             )
     @staticmethod
@@ -254,7 +254,7 @@ class ResourceAnalyzer:
     async def check_document_similarity(text, master_keyword):
         """Check if content is relevant to group theme using GPT"""
         try:
-            response = await ResourceAnalyzer.client.responses.parse(
+            response = await ResourceAnalyzer.client.responses.create(
                     model="gpt-5-mini",
                     input=[
                         {
@@ -271,16 +271,18 @@ class ResourceAnalyzer:
                             "content": (
                                 f"The following is the text to analyze:\n\n{text}\n\n"
                                 f"Here is the complete list of skills and interests available on the server:\n{master_keyword}\n\n"
-                                "Return only the matched skills as plain text or a clean list."
+                                "Return only the matched skills as plain text seperated by commas Do not include explanations"
                             )
                         }
-                    ],
-                    response_format=Keyword
+                    ]
             )
+
             
-            result = response.output_parsed()
-            result = list(result.keyword_list)
-            return result
+            result = response.output_text
+            output = result.split(',')
+            print(f"-----> this is the doc output {output}")
+            # result = list(result.keyword_list)
+            return output
         except Exception as e:
             logger.error(f"Error checking relevance: {e}")
             return ""
@@ -292,9 +294,9 @@ class ResourceAnalyzer:
 
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
-                content = await response.text() 
+                content = await response.text()
         soup = BeautifulSoup(content , "html.parser")
-        response = await ResourceAnalyzer.client.responses.parse(
+        response = await ResourceAnalyzer.client.responses.create(
             model="gpt-5-mini",
             input=[
                 {
@@ -311,14 +313,16 @@ class ResourceAnalyzer:
                     "content": (
                         f"The following is the HTML content:\n\n{soup.prettify()}\n\n"
                         f"Here is the list of skills and interests to compare against:\n{master_keyword}\n\n"
-                        "Return only the matched skills as plain text or a clean list. Do not include explanations."
+                        "Return only the matched skills as plain text seperated by commas Do not include explanations."
                     )
                 }
             ],
-            response_format=Keyword # type: ignore
+
         ) # type: ignore
-        output_keyword = response.output_parsed
-        output = list(output_keyword.keyword_list)
+        output_keyword = response.output_text
+        output = output_keyword.split(',')
+
+        # output = list(output_keyword.keyword_list)
         return output
 
 
@@ -331,12 +335,21 @@ class ResourceAnalyzer:
             users_profiles = {}
             for user in users_data:
                 users_profiles[user['discord_id']] =  user['skills'].lower(),
-    
+            
             for matched_skill in keyword_list:
+                print(f"matched skills {matched_skill}")
                 for user, skill in users_profiles.items():
-                    if matched_skill.lower() in skill:
+                    # print(f"skill is here {skill} --- type {type(skill)}")
+                    skill = skill[0].split(',')
+
+                    for x in skill:
+                        x = x.strip()
+                    print(f"-- if condition {matched_skill.lower()} ---- skill {skill} -----> if condition {matched_skill.lower() in list(skill)}")
+                    if (matched_skill.lower()) in list(skill):
                         matched_user_ids.append(user)
 
+
+            print(f"matched pairs {matched_user_ids}")
             return matched_user_ids
         except Exception as e:
             logger.error(f"Error matching users: {e}")
@@ -437,31 +450,39 @@ class ResourceBot(commands.Bot):
         url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
         urls = re.findall(url_pattern, message.content)
         keyword_list = []
+        print(f"----> master key word {master_keyword}")
         
         if urls:
             for url in urls: 
                 keyword_list = await self.analyzer.get_web_content(url, master_keyword )
+                print(f"---->url {keyword_list}")
     
         # Check for document attachments
         if not resource_found and message.attachments:
             for attachment in message.attachments:
                 if attachment.filename.lower().endswith(('.pdf', '.docx', '.doc', '.txt', '.md')):
                     text = await self.analyzer.extract_text_from_document(attachment)
+                    # print(f"---> doc text is {text}")
                     if text:
                         doc_keyword = self.analyzer.check_document_similarity(text, master_keyword)
-                        keyword_list.extend(doc_keyword) # type: ignore
+                        print(f"-----> this is the doc after the LLM {doc_keyword}")
+                        keyword_list.append(doc_keyword) # type: ignore
         
         if len(keyword_list) != 0 :
             resource_found = True
+
+        print(f"HHFBSBBFSDBFSBB FSUBBFBEBF {keyword_list}")
     
         
         # If resource found, match and tag users
         if resource_found:
             users = self.db_manager.get_all_users(message.guild.id)
+            print(f"users are here {users}")
             if users:
                 matched_user_ids = await self.analyzer.match_users_to_resource(
                      users, keyword_list
                 )
+                print(f"matched users are {matched_user_ids}")
                 matched_user_ids = list(set(matched_user_ids))
                 if matched_user_ids:
                     # Create mention string
@@ -483,6 +504,7 @@ class ResourceBot(commands.Bot):
                             inline=False
                         )
                         embed.set_footer(text="This resource matches your profile interests/skills")
+                        print
                         
                         await message.reply(embed=embed)
 
