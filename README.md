@@ -31,7 +31,7 @@ Based on the code, Ozo offers powerful functionality:
 | **Data Storage** | `sqlite3` (built-in) | Persistent storage for user profiles (`users`) and server settings (`server_configs`). |
 | **Configuration**| `os` | Environment variable management. |
 
-### `requirements.txt` (Confirmed Dependencies)
+## `requirements.txt` (Confirmed Dependencies)
 
 ```bash
 discord
