@@ -41,3 +41,31 @@ PyPDF2
 python-docx
 aiohttp
 beautifulsoup4
+
+
+# 💬 Ozo Bot Command Reference
+
+Ozo utilizes Discord **Slash Commands** (`/`) and a **Modal** for user interaction and administrative setup.
+
+---
+
+## 🧑‍💻 User Commands
+
+These commands allow users to manage their profiles, register their interests, and view server statistics.
+
+| Command | Description | Action |
+| :--- | :--- | :--- |
+| **`/register`** | Register your academic profile, including job title, skills, and interests. If you are already registered, this will update your profile. | Opens a multi-field **Discord Modal** for easy entry. |
+| **`/profile`** | View your current registered profile details (Job Title, Skills, and Interests). | Displays information privately (`ephemeral`). |
+| **`/edit_profile`**| Edit your existing profile data. | Opens a pre-filled **Discord Modal** with your current information. |
+| **`/stats`** | View bot statistics for the current server, including the count of registered users and the defined server theme. | Displays server stats privately (`ephemeral`). |
+
+---
+
+## 👑 Admin Command
+
+This command allows server administrators to define the academic focus of the server, which helps the AI accurately determine content relevance.
+
+| Command | Description | Permissions |
+| :--- | :--- | :--- |
+| **`/set_theme [theme]`**| Set the overall academic theme of the server (e.g., "Deep Learning Research"). This theme is used to contextualize the AI analysis. | **Administrator** permissions required. |
